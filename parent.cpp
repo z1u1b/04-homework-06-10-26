@@ -1,57 +1,60 @@
-#include <unistd.h>
-#include <sys/wait.h>
-#include <cassert>
-#include <cstdio>
-#include <string>
+#include <windows.h>
 #include <iostream>
+#include <string>
 
 const char msg[256] = "user data\n";
 
-size_t send(int& err, int wr, const char* b, size_t k)
+DWORD send(DWORD& err, HANDLE wr, const char* b, DWORD k)
 {
-  size_t r = 0;
+  DWORD r = 0;
+  bool st = true;
+  DWORD h = 0;
   while (r < k) {
-    err = write(wr, b + r, k - r);
-    if (err < 0)
+    st = WriteFile(wr, b + r, k - r, &h, NULL);
+    if (!st) {
+      err = GetLastError();
       break;
-    r += err;
+    }
+    r += h;
   }
+
   return r;
 }
 
-int main()
+int main(int argc, char** argv)
 {
-  std::string s;
-  std::getline(std::cin, s);
+  HANDLE read, write;
 
-  int pps[2] = {}, err = pipe(pps);
-  assert(!err);
-  int rd = pps[0], wr = pps[1];
-  pid_t pid = fork();
-  assert(pid >= 0);
-  if (!pid) {
-    err = close(wr);
-    assert(!err);
-    char p[100] = {};
-    err = sprintf(p, "%d", rd);
-    assert(err > 0);
-    execl("child", "child", p, NULL);
-    assert(0);
+  SECURITY_ATTRIBUTES sa = {
+      sizeof(SECURITY_ATTRIBUTES),
+      NULL,
+      FALSE,
+  };
+  if (!CreatePipe(&read, &write, &sa, 256)) {
+    std::cerr << GetLastError() << std::endl;
+    return 1;
   }
-  err = close(rd);
-  assert(!err);
+  SetHandleInformation(read, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
 
-  char p[8] = {};
-  err = sprintf(p, "%zu", s.size());
-  assert(err > 0);
-  send(err, wr, p, 8);
-  assert(err > 0);
-
-  if (!s.empty()) {
-    send(err, wr, s.c_str(), s.size());
+  PROCESS_INFORMATION pi = {};
+  STARTUPINFOA si = {sizeof(si)};
+  std::string cmd = std::string(argv[1]) + ' ' + std::to_string(reinterpret_cast< DWORD_PTR >(read));
+  if (!CreateProcessA(argv[1], cmd.data(), NULL, NULL, TRUE, NORMAL_PRIORITY_CLASS, NULL, NULL, &si, &pi)) {
+    CloseHandle(read);
+    CloseHandle(write);
+    std::cerr << GetLastError() << std::endl;
+    return 1;
   }
-  err = close(wr);
-  assert(!err);
-  err = waitpid(pid, 0, 0);
-  assert(err == pid);
+  CloseHandle(read);
+
+  DWORD err = 0, k = 255;
+  if (send(err, write, msg, k) != k) {
+    std::cerr << err << '\n';
+    CloseHandle(write);
+    return 1;
+  }
+  DWORD w = WaitForSingleObject(pi.hProcess, INFINITE);
+  CloseHandle(write);
+  CloseHandle(pi.hThread);
+  CloseHandle(pi.hProcess);
 }
